@@ -1,0 +1,248 @@
+\documentclass[a4paper,11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{caption}
+
+\geometry{margin=2.5cm}
+
+\lstdefinestyle{PythonStyle}{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\bfseries,
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  showstringspaces=false,
+  tabsize=4,
+  breaklines=true
+}
+
+\title{Labwork 1 - File Transfer over TCP/IP in CLI}
+\author{Tran Anh Quoc -- 22BA13266\\Class: \texttt{B3 - CS}}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Overview}
+
+The goal of this work is to build a simple one-to-one file transfer mechanism on top of a TCP client--server architecture.  The system is controlled entirely from the command line and implemented in Python using the standard \texttt{socket} library.
+
+Although we use Python, the design follows the classic BSD sockets model.  Each Python call maps directly to a C API mentioned in the specification:
+
+\begin{itemize}
+  \item \texttt{socket.socket()} $\rightarrow$ \texttt{socket()}
+  \item \texttt{sock.setsockopt()} $\rightarrow$ \texttt{setsockopt()}
+  \item \texttt{sock.bind()} $\rightarrow$ \texttt{bind()}
+  \item \texttt{socket.gethostbyname()} $\rightarrow$ \texttt{gethostbyname()}
+  \item \texttt{sock.listen()} $\rightarrow$ \texttt{listen()}
+  \item \texttt{sock.accept()} $\rightarrow$ \texttt{accept()}
+  \item \texttt{sock.connect()} $\rightarrow$ \texttt{connect()}
+  \item \texttt{sock.sendall()} $\rightarrow$ \texttt{send()}
+  \item \texttt{sock.recv()} $\rightarrow$ \texttt{recv()}
+\end{itemize}
+
+TCP provides a reliable, ordered byte stream.  Our task is therefore to define a small application-level protocol on top of this stream and to implement the corresponding client and server logic.
+
+\section{Protocol Design}
+
+\subsection*{Message format}
+
+We use a very simple protocol and support one operation: \emph{client sends one file to the server}.  After the TCP connection is established, the client sends:
+
+\begin{enumerate}
+  \item A fixed-size header (11 bytes):
+    \begin{itemize}
+      \item 1 byte: \textbf{opcode}.  We use value \texttt{0x01} to mean
+            ``send file''.
+      \item 2 bytes: \textbf{file name length} $N$ (unsigned, big-endian).
+      \item 8 bytes: \textbf{file size} in bytes (unsigned, big-endian).
+    \end{itemize}
+  \item $N$ bytes: \textbf{file name}, encoded as UTF-8 (no terminator).
+  \item \textbf{file data}: exactly ``file size'' bytes.
+\end{enumerate}
+
+The server reads the header, then the file name, then receives exactly ``file size'' bytes and writes them to disk.  The client closes the connection when the transfer is complete; on the server side, \texttt{recv()} returns \texttt{0} when the client closes the socket.
+
+\begin{figure}[h]
+  \centering
+  \fbox{\parbox{0.9\linewidth}{
+  \textbf{Client} \hfill \textbf{Server}\\[0.3em]
+  TCP 3-way handshake (SYN, SYN+ACK, ACK)\\[0.3em]
+  \textbf{Client} $\rightarrow$ \textbf{Server}:\\
+  \hspace*{1em}Opcode (0x01)\\
+  \hspace*{1em}File name length (2 bytes, big-endian)\\
+  \hspace*{1em}File size (8 bytes, big-endian)\\
+  \hspace*{1em}File name (N bytes, UTF-8)\\
+  \hspace*{1em}File content (``file size'' bytes)\\[0.3em]
+  \textbf{Server}:\\
+  \hspace*{1em}Parse header, create output file\\
+  \hspace*{1em}Loop: \texttt{recv()} $\rightarrow$ write to disk\\
+  \hspace*{1em}Stop when all bytes received\\[0.3em]
+  Client closes connection; server closes socket.
+  }}
+  \caption{Application-level protocol for one-to-one file transfer.}
+  \label{fig:protocol}
+\end{figure}
+
+Figure~\ref{fig:protocol} illustrates how the file metadata and payload
+are sent over the established TCP connection.
+
+\section{System Organisation}
+
+The system is organised as two Python scripts:
+
+\begin{itemize}
+  \item \texttt{server.py}: waits for one client, receives exactly one
+        file and stores it in the current directory.
+  \item \texttt{client.py}: connects to the server and sends a local
+        file once, then exits.
+\end{itemize}
+
+The command-line usage is:
+
+\begin{verbatim}
+# Server side
+$ python3 server.py <port>
+
+# Client side
+$ python3 client.py <server_host> <port> <file_path>
+\end{verbatim}
+
+\begin{figure}[h]
+  \centering
+  \fbox{\parbox{0.9\linewidth}{
+   \textbf{server.py}\\
+   - socket.socket(AF\_INET, SOCK\_STREAM)\\
+   - set sockopt(SO\_REUSEADDR)\\
+   - bind() to 0.0.0.0:\emph{port}\\
+   - listen() for incoming connections\\
+   - accept() one connection\\
+   - receive header and file, write to disk\\
+   - close connection and listening socket\\[0.5em]
+   \textbf{client.py}\\
+   - socket.gethostbyname(server\_host)\\
+   - socket.socket(AF\_INET, SOCK\_STREAM)\\
+   - connect() to server\\
+   - open local file, compute size\\
+   - send header, file name, file data\\
+   - close socket
+  }}
+  \caption{High-level organisation of the client--server system.}
+  \label{fig:system}
+\end{figure}
+
+Figure~\ref{fig:system} shows the mapping between the logical design and the two Python programs.
+
+\section{Implementation Highlights}
+
+This section presents key parts of the Python implementation that show how the protocol is implemented on top of the socket API.
+
+\subsection*{Server side}
+
+The server listens on a TCP port, accepts a single client and then receives and stores one file.  The helper function \texttt{recv\_exact()} ensures that we read exactly the requested number of bytes from the TCP stream.
+
+\begin{lstlisting}[style=PythonStyle,
+  caption={Simplified server-side implementation in Python.},
+  label={lst:server}]
+# server.py
+import socket, struct, sys, os
+
+def recv_exact(sock, n):
+    data = b""
+    while len(data) < n:
+        chunk = sock.recv(n - len(data))
+        if not chunk:
+            raise ConnectionError("Connection closed early")
+        data += chunk
+    return data
+
+port = int(sys.argv[1])
+
+listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+listen_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listen_sock.bind(("0.0.0.0", port))
+listen_sock.listen(1)
+
+print(f"[+] Listening on 0.0.0.0:{port}")
+conn, addr = listen_sock.accept()
+print(f"[+] Connection from {addr}")
+
+header_fmt = "!BHQ"
+header_size = struct.calcsize(header_fmt)
+header = recv_exact(conn, header_size)
+opcode, name_len, file_size = struct.unpack(header_fmt, header)
+
+filename_bytes = recv_exact(conn, name_len)
+filename = filename_bytes.decode("utf-8")
+print(f"[+] Receiving {filename} ({file_size} bytes)")
+
+remaining = file_size
+with open(filename, "wb") as f:
+    while remaining > 0:
+        chunk = conn.recv(4096 if remaining > 4096 else remaining)
+        if not chunk:
+            raise ConnectionError("Connection closed while receiving file")
+        f.write(chunk)
+        remaining -= len(chunk)
+
+print("[+] Transfer complete")
+conn.close()
+listen_sock.close()
+\end{lstlisting}
+
+\subsection*{Client side}
+
+The client resolves the server name, connects to the server and sends the header, file name and file content.  We use \texttt{sendall()} so that the whole buffer is transmitted even if the underlying \texttt{send} call would have to be repeated.
+
+\begin{lstlisting}[style=PythonStyle,
+  caption={Simplified client-side implementation in Python.},
+  label={lst:client}]
+# client.py
+import socket, struct, sys, os
+
+server_host = sys.argv[1]
+port        = int(sys.argv[2])
+file_path   = sys.argv[3]
+
+server_ip = socket.gethostbyname(server_host)
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.connect((server_ip, port))
+print(f"[+] Connected to {server_ip}:{port}")
+
+file_size = os.path.getsize(file_path)
+filename  = os.path.basename(file_path).encode("utf-8")
+name_len  = len(filename)
+opcode    = 0x01
+
+header_fmt = "!BHQ"
+header = struct.pack(header_fmt, opcode, name_len, file_size)
+
+sock.sendall(header)
+sock.sendall(filename)
+print(f"[+] Sending {file_path} ({file_size} bytes)")
+
+with open(file_path, "rb") as f:
+    while True:
+        chunk = f.read(4096)
+        if not chunk:
+            break
+        sock.sendall(chunk)
+
+print("[+] File sent successfully")
+sock.close()
+\end{lstlisting}
+
+\section{Conclusion}
+
+We designed a minimal application-level protocol for one-to-one file transfer and implemented it as a pair of Python CLI programs.  The implementation uses the standard socket API in a way that mirrors the classic C functions \texttt{socket()}, \texttt{bind()}, \texttt{listen()}, \texttt{accept()}, \texttt{connect()}, \texttt{send()} and \texttt{recv()}.  TCP guarantees reliable and ordered delivery of bytes, so by carefully defining the header format and looping until all bytes are sent and received, the file is reconstructed exactly at the server side.
+
+The design can be extended in future work to support multiple clients, additional operations (e.g.\ download) or integration with an existing chat protocol on the same TCP connection.
+
+\end{document}
