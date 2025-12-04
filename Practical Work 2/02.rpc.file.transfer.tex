@@ -1,0 +1,347 @@
+% 01.tcp.file.transfer.rpc.tex
+\documentclass[a4paper,11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{caption}
+\usepackage{hyperref}
+
+\geometry{margin=2.5cm}
+
+\lstdefinestyle{PythonStyle}{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\bfseries,
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  showstringspaces=false,
+  tabsize=4,
+  breaklines=true
+}
+
+\title{RPC-based 1-1 File Transfer over TCP/IP in CLI}
+\author{Tran Anh Quoc -- 22BA13266\\Class: 22-Cybersecurity}
+\date{} % no date
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+
+The original requirement was to build a simple one-to-one file transfer
+system over TCP/IP using a client--server architecture and the classic
+socket API (\texttt{socket}, \texttt{bind}, \texttt{listen},
+\texttt{accept}, \texttt{connect}, \texttt{send}, \texttt{recv}, etc.).
+In the first version, a custom application-layer protocol was defined on
+top of a raw TCP stream.
+
+In this report, the system is upgraded to use \textbf{RPC (Remote
+Procedure Call)} instead of manually sending and parsing headers over
+the TCP connection.  The concrete choice of RPC service is
+\textbf{XML-RPC in Python}, implemented using the standard library
+modules \texttt{xmlrpc.server} and \texttt{xmlrpc.client}.  Under the
+hood, XML-RPC still relies on TCP sockets and HTTP, but it exposes a
+clean function-style interface to the application.
+
+The final result is a CLI-based system where the client simply calls a
+remote function:
+
+\begin{verbatim}
+upload_file(filename, binary_data) -> bool
+\end{verbatim}
+
+and the RPC framework takes care of marshalling, transport and
+unmarshalling.
+
+\section{Baseline TCP Design (Summary)}
+
+The baseline design before upgrading to RPC used a single TCP connection
+and a custom header:
+
+\begin{itemize}
+  \item 1 byte: opcode (0x01 = send file)
+  \item 2 bytes: file name length (unsigned, big-endian)
+  \item 8 bytes: file size in bytes (unsigned, big-endian)
+  \item $N$ bytes: file name (UTF-8)
+  \item file content: exactly ``file size'' bytes
+\end{itemize}
+
+The server used \texttt{socket()}, \texttt{bind()}, \texttt{listen()}
+and \texttt{accept()} to establish the connection, then repeatedly
+called \texttt{recv()} to read the header and file content.  The client
+used \texttt{gethostbyname()} and \texttt{connect()} to reach the
+server, then \texttt{send()} to push header and data.
+
+This design already achieved reliable file transfer using TCP, but the
+application code was tightly coupled to low-level details: header
+packing/unpacking, manual loops to ensure all bytes were sent and
+received, etc.  RPC abstracts these details away.
+
+\section{RPC-Based Protocol Design}
+
+\subsection*{RPC interface}
+
+In the upgraded system, the application-level protocol is expressed in
+terms of a single remote procedure:
+
+\begin{verbatim}
+bool upload_file(string filename, binary data)
+\end{verbatim}
+
+The semantics are:
+
+\begin{itemize}
+  \item Input:
+    \begin{itemize}
+      \item \texttt{filename}: name of the file to create on the server.
+      \item \texttt{data}: raw file content as a byte sequence.
+    \end{itemize}
+  \item Output: \texttt{True} if the file was stored successfully,
+        \texttt{False} otherwise.
+\end{itemize}
+
+The XML-RPC framework automatically:
+
+\begin{itemize}
+  \item serialises the function name and arguments into XML,
+  \item sends them in an HTTP request over TCP to the server,
+  \item calls the corresponding Python function on the server,
+  \item serialises the return value and sends it back to the client.
+\end{itemize}
+
+From the application's point of view, calling a remote procedure looks
+almost the same as calling a local function.
+
+\subsection*{Protocol figure}
+
+\begin{figure}[h]
+  \centering
+  \fbox{\parbox{0.92\linewidth}{
+   \textbf{Client} \hfill \textbf{RPC Server}\\[0.4em]
+   1. Application opens local file and reads its content.\\[0.2em]
+   2. Client creates XML-RPC proxy to the server URL.\\[0.2em]
+   3. \textbf{Client} $\rightarrow$ \textbf{Server}:\\
+   \hspace*{1em}XML-RPC request over HTTP/TCP\\
+   \hspace*{1em}Method: \texttt{upload\_file}\\
+   \hspace*{1em}Parameters: \texttt{filename}, \texttt{binary data}\\[0.2em]
+   4. RPC server unmarshals request and calls local\\
+   \hspace*{1em}\texttt{upload\_file(filename, file\_data)}.\\[0.2em]
+   5. Server writes data to file on disk.\\[0.2em]
+   6. \textbf{Server} $\rightarrow$ \textbf{Client}:\\
+   \hspace*{1em}XML-RPC response (\texttt{True}/\texttt{False}).\\[0.2em]
+   7. Client checks return value and prints result.\\
+  }}
+  \caption{RPC-based protocol for one-to-one file upload.}
+  \label{fig:rpc_protocol}
+\end{figure}
+
+In contrast to the previous custom header design, there is no explicit
+opcode or length field in the application code: these details are
+handled by the RPC framework.
+
+\section{System Organisation}
+
+The system is organised into two Python scripts:
+
+\begin{itemize}
+  \item \textbf{\texttt{rpc\_server.py}}: exposes the remote procedure
+        \texttt{upload\_file} via XML-RPC.
+  \item \textbf{\texttt{rpc\_client.py}}: connects to the XML-RPC
+        service and calls \texttt{upload\_file} to upload a local file.
+\end{itemize}
+
+The CLI usage is:
+
+\begin{verbatim}
+# On the server machine:
+$ python3 rpc_server.py <port>
+
+# On the client machine:
+$ python3 rpc_client.py <server_host> <port> <file_path>
+\end{verbatim}
+
+\begin{figure}[h]
+  \centering
+  \fbox{\parbox{0.92\linewidth}{
+   \textbf{rpc\_server.py}\\
+   - create XML-RPC server bound to 0.0.0.0:\emph{port}\\
+   - register function \texttt{upload\_file}\\
+   - enter \texttt{serve\_forever()} loop\\[0.6em]
+   \textbf{rpc\_client.py}\\
+   - resolve server host and build XML-RPC URL\\
+   - open local file and read bytes\\
+   - call \texttt{upload\_file(filename, Binary(data))}\\
+   - print server response and exit
+  }}
+  \caption{High-level organisation of the RPC-based file transfer system.}
+  \label{fig:system}
+\end{figure}
+
+Internally, the XML-RPC server still uses the underlying socket API:
+\texttt{socket()}, \texttt{bind()}, \texttt{listen()}, \texttt{accept()}
+for incoming connections, and \texttt{send()}/\texttt{recv()} for
+transport.  However, this low-level logic is encapsulated in the
+library instead of being written manually in the application code.
+
+\section{Implementation: File Transfer via XML-RPC}
+
+\subsection*{Server-side implementation}
+
+The RPC server exposes a single function \texttt{upload\_file} that
+accepts a filename and a binary blob and writes it to disk.  The
+\texttt{Binary} wrapper type from \texttt{xmlrpc.client} is used on the
+client side to indicate that the parameter is raw bytes; on the server
+side, the incoming object has a \texttt{.data} attribute containing the
+actual byte string.
+
+\begin{lstlisting}[style=PythonStyle,
+  caption={RPC server exposing the \texttt{upload\_file} service.},
+  label={lst:rpc_server}]
+#!/usr/bin/env python3
+from xmlrpc.server import SimpleXMLRPCServer, SimpleXMLRPCRequestHandler
+import sys
+import os
+
+class RequestHandler(SimpleXMLRPCRequestHandler):
+    # Restrict XML-RPC path for security
+    rpc_paths = ("/RPC2",)
+
+def upload_file(filename, file_data):
+    """
+    Remote procedure:
+      - filename: string
+      - file_data: object with attribute .data (bytes)
+    """
+    safe_name = os.path.basename(filename)  # avoid path traversal
+    data_bytes = file_data.data
+
+    print(f"[+] Saving file {safe_name} ({len(data_bytes)} bytes)")
+    with open(safe_name, "wb") as f:
+        f.write(data_bytes)
+    print("[+] Done.")
+    return True  # status for the client
+
+def main():
+    if len(sys.argv) != 2:
+        print(f"Usage: {sys.argv[0]} <port>")
+        sys.exit(1)
+
+    port = int(sys.argv[1])
+
+    # Create XML-RPC server on 0.0.0.0:port
+    with SimpleXMLRPCServer(("0.0.0.0", port),
+                            requestHandler=RequestHandler,
+                            allow_none=True) as server:
+        print(f"[+] XML-RPC server listening on 0.0.0.0:{port}")
+
+        # Register the remote function
+        server.register_function(upload_file, "upload_file")
+
+        # Start serving requests
+        server.serve_forever()
+
+if __name__ == "__main__":
+    main()
+\end{lstlisting}
+
+\subsection*{Client-side implementation}
+
+The client reads a local file into memory and sends it to the server by
+calling the remote procedure.  The only network operation visible in
+the application code is the method call on the XML-RPC proxy object.
+
+\begin{lstlisting}[style=PythonStyle,
+  caption={RPC client calling \texttt{upload\_file} to transfer a file.},
+  label={lst:rpc_client}]
+#!/usr/bin/env python3
+from xmlrpc.client import ServerProxy, Binary
+import sys
+import os
+
+def main():
+    if len(sys.argv) != 4:
+        print(f"Usage: {sys.argv[0]} <server_host> <port> <file_path>")
+        sys.exit(1)
+
+    server_host = sys.argv[1]
+    port        = int(sys.argv[2])
+    file_path   = sys.argv[3]
+
+    if not os.path.isfile(file_path):
+        print("[-] File not found:", file_path)
+        sys.exit(1)
+
+    # Build XML-RPC endpoint URL
+    url = f"http://{server_host}:{port}/RPC2"
+    server = ServerProxy(url, allow_none=True)
+
+    # Read file into memory
+    with open(file_path, "rb") as f:
+        data = f.read()
+
+    filename = os.path.basename(file_path)
+    print(f"[+] Uploading {filename} ({len(data)} bytes) to {url}")
+
+    # Binary(...) tells XML-RPC that this parameter is raw bytes
+    ok = server.upload_file(filename, Binary(data))
+
+    if ok:
+        print("[+] File uploaded successfully via RPC.")
+    else:
+        print("[-] Server reported failure.")
+
+if __name__ == "__main__":
+    main()
+\end{lstlisting}
+
+\subsection*{Mapping to classic socket functions}
+
+Even though the code above does not call the low-level functions
+explicitly, the XML-RPC library internally relies on the same primitives
+specified in the assignment:
+
+\begin{itemize}
+  \item \textbf{On the server side}:
+    \begin{itemize}
+      \item \texttt{socket()} to create a listening socket.
+      \item \texttt{setsockopt()} to configure options such as
+            \texttt{SO\_REUSEADDR}.
+      \item \texttt{bind()} to associate the socket with an address.
+      \item \texttt{listen()} to wait for incoming connections.
+      \item \texttt{accept()} to accept a client connection.
+      \item \texttt{recv()} and \texttt{send()} to read/write HTTP/XML.
+    \end{itemize}
+  \item \textbf{On the client side}:
+    \begin{itemize}
+      \item \texttt{gethostbyname()} to resolve the server hostname.
+      \item \texttt{socket()} and \texttt{connect()} to open the TCP
+            connection.
+      \item \texttt{send()} and \texttt{recv()} to implement HTTP/XML-RPC.
+    \end{itemize}
+\end{itemize}
+
+Thus the upgraded system still satisfies the requirement to use socket
+functions, but in a more structured RPC fashion.
+
+\section{Conclusion}
+
+This report presented a complete redesign of a one-to-one file transfer
+system from a custom TCP-based protocol to an RPC-based architecture
+using XML-RPC in Python.  By exposing a single remote procedure
+\texttt{upload\_file}, the application logic becomes simpler, and the
+implementation is cleaner: marshalling, transport and unmarshalling are
+delegated to the RPC framework.
+
+The system still relies on the standard socket API underneath, but the
+application code operates at the level of function calls instead of raw
+byte streams.  This approach can be extended to support additional
+operations such as downloading files, listing files on the server or
+integrating authentication and access control, simply by adding more
+remote procedures.
+
+\end{document}
