@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package shell;
+
+option go_package = "remote-shell-rpc/proto";
+
+// ShellService provides remote shell execution capabilities
+service ShellService {
+    // CreateSession initializes a new shell session for a client
+    rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+    
+    // CloseSession terminates an existing shell session
+    rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+    
+    // ExecuteCommand runs a command and returns the complete result
+    rpc ExecuteCommand(CommandRequest) returns (CommandResponse);
+    
+    // ExecuteCommandStream runs a command and streams the output
+    rpc ExecuteCommandStream(CommandRequest) returns (stream CommandOutput);
+}
+
+message CreateSessionRequest {
+    string client_id = 1;
+}
+
+message CreateSessionResponse {
+    string session_id = 1;
+    string working_directory = 2;
+}
+
+message CloseSessionRequest {
+    string session_id = 1;
+}
+
+message CloseSessionResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message CommandRequest {
+    string session_id = 1;
+    string command = 2;
+    int32 timeout_seconds = 3;
+}
+
+message CommandResponse {
+    string output = 1;
+    string error = 2;
+    int32 exit_code = 3;
+    int64 execution_time_ms = 4;
+}
+
+message CommandOutput {
+    enum OutputType {
+        STDOUT = 0;
+        STDERR = 1;
+    }
+    OutputType type = 1;
+    bytes data = 2;
+    bool is_complete = 3;
+    int32 exit_code = 4;
+}

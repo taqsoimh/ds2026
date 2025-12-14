@@ -1,0 +1,10 @@
+# Client Configuration
+server:
+  host: "localhost"
+  port: 50051
+  timeout: 10s
+
+# Shell Configuration
+shell:
+  prompt: "remote> "
+  history_size: 100
